@@ -8,7 +8,6 @@ use Hyperf\Contract\OnCloseInterface;
 use Hyperf\Contract\OnMessageInterface;
 use Hyperf\Contract\OnOpenInterface;
 use Swoole\Http\Request;
-use Swoole\Http\Response;
 use Swoole\Server;
 use Swoole\Websocket\Frame;
 use Swoole\WebSocket\Server as WebSocketServer;
@@ -17,12 +16,17 @@ class XppChatController implements OnMessageInterface, OnOpenInterface, OnCloseI
     public function onMessage(WebSocketServer $server, Frame $frame): void
     {
         //todo 验证FD是否还在线
-        $chatUid = 2;
 //        $bindFdToUidKey = "ws:Bind:fd[{$frame->}]-To-Uid";
         $redis = di()->get(\Redis::class);
         $redis->select(6);
-        $getChatFdKey = "ws:Bind:uid[{$chatUid}]-To-Fds";
-        $toChatFd = $redis->hGet($getChatFdKey,"CHAT-FD");
+        //当前fd绑定的谁发送给谁的UID
+        $bindFdToUidKey = "ws:Bind:fd[{$frame->fd}]-To-Uid";
+        $toUid = $redis->hGet($bindFdToUidKey,"toUid");
+        //获取要发送人的UID
+        $getToUidFdKey = "ws:Bind:uid[{$toUid}]-To-Fds";
+        //获取该要发送用户的FD
+        $toChatFd = $redis->hGet($getToUidFdKey,"CHAT-FD");
+        //如果获取不到FD就用户不在线
         if ($toChatFd) {
             $server->push($toChatFd,$frame->data);
         }else {
@@ -53,9 +57,15 @@ class XppChatController implements OnMessageInterface, OnOpenInterface, OnCloseI
         $redis = di()->get(\Redis::class);
         $redis->select(6);
         $bindFdToUidKey = "ws:Bind:fd[{$fd}]-To-Uid";
-        $uid = $redis->get($bindFdToUidKey);
+        $uid = $redis->hGet($bindFdToUidKey,"fromUid");
         if (!empty($uid)) {
-            $redis->hDel("ws:Bind:uid[{$uid}]-To-Fds","CHAT-FD");
+//            $redis->hDel($bindFdToUidKey,"CHAT-FD");
+            $bindUidToFds = "ws:Bind:uid[{$uid}]-To-Fds";
+            $chatFd = $redis->hGet($bindUidToFds,"CHAT-FD");
+            if (!empty($chatFd)) {
+                $redis->hDel($bindUidToFds,"CHAT-FD");
+                $redis->hDel("ws:Bind:fd[{$chatFd}]-To-Uid","fromUid","toUid");
+            }
         }
     }
 
@@ -65,22 +75,18 @@ class XppChatController implements OnMessageInterface, OnOpenInterface, OnCloseI
         var_dump($request);
         $server->push($request->fd, 'Opened');
         $token = $request->header['sec-websocket-protocol'];
+
         //检查登录情况 todo checkToken
-        $token = false;
-
-        if (empty($token) || $token !== 'token') {
-            $token = true;
-        }
-
         $redis = di()->get(\Redis::class);
         $redis->select(5);
         $tokenKey = "USERINFO:".$token;
+//        $redis->hSet($tokenKey,'id',$token);
         $uid = $redis->hGet($tokenKey,"id");
 
         if (empty($uid)) {
-            $token = true;
+            $token = false;
         }
-        if ($token) {
+        if (!$token) {
             $server->push($request->fd, '关闭连接');
             $server->close($request->fd);
         }
@@ -96,13 +102,14 @@ class XppChatController implements OnMessageInterface, OnOpenInterface, OnCloseI
         $server->push($request->fd,"哈哈哈哈，沙雕。");
 //
         $pathInfo = $request->server['path_info'];
-        $sendTouid = intval(explode('/',$pathInfo)[1]);
-        if (empty($uid)) {
-            $server->push($request->fd, '不存在UID');
+        $toUid = intval(explode('/',$pathInfo)[2]);
+        if (empty($toUid)) {
+            $server->push($request->fd, '不存在发送UID');
             $server->close($request->fd);
         }
-        $bindFdToUidKey = "ws:Bind:fd[{$request->fd}]-SendTo-Uid";
-        $redis->set($bindFdToUidKey,$sendTouid);
+        $bindFdToUidKey = "ws:Bind:fd[{$request->fd}]-To-Uid";
+        $redis2->hMSet($bindFdToUidKey,['toUid' =>$toUid,'fromUid' => $uid]);
+        $redis2->expire($bindFdToUidKey,3600);
         //todo
 
     }
